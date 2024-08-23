@@ -1,0 +1,8 @@
+../Core/Src/uart.c:17:6:uartx_write	1
+../Core/Src/uart.c:23:6:uartx_write_text	2
+../Core/Src/uart.c:31:9:uartx_read	1
+../Core/Src/uart.c:40:6:uartx_read_text	3
+../Core/Src/uart.c:55:6:COMANDO_AT_SEND	1
+../Core/Src/uart.c:72:10:COMANDO_AT_SEND1	2
+../Core/Src/uart.c:90:6:Comando	1
+../Core/Src/uart.c:129:6:Comandofinal	1

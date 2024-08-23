@@ -1,0 +1,13 @@
+../Core/Src/main.c:114:5:main	4
+../Core/Src/main.c:216:6:SystemClock_Config	3
+../Core/Src/main.c:256:13:MX_I2C1_Init	2
+../Core/Src/main.c:290:13:MX_USART1_UART_Init	2
+../Core/Src/main.c:323:13:MX_USART2_UART_Init	2
+../Core/Src/main.c:356:13:MX_USART3_UART_Init	2
+../Core/Src/main.c:387:13:MX_DMA_Init	1
+../Core/Src/main.c:405:13:MX_GPIO_Init	1
+../Core/Src/main.c:421:6:process_gps_data	6
+../Core/Src/main.c:461:6:send_gps_data	4
+../Core/Src/main.c:469:6:Format_data	1
+../Core/Src/main.c:477:6:HAL_UART_RxCpltCallback	2
+../Core/Src/main.c:490:6:Error_Handler	1
