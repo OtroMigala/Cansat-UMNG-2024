@@ -100,6 +100,8 @@ static void MX_USART2_UART_Init(void);
 void process_gps_data(void);
 void send_gps_data(void);
 void Format_data(float time, float lat, char lat_dir, float lon, char long_dir);
+void LoRa_Init(void);
+void LoRa_Send(const char* data);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -142,6 +144,7 @@ int main(void)
   MX_USART3_UART_Init();
   MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
+  LoRa_Init();
   HAL_UART_Receive_DMA(&huart2, (uint8_t*)gpsBuffer, GPS_BUFFER_SIZE);
   lastTransmissionTime = 0 ;
 
@@ -202,6 +205,8 @@ int main(void)
 
 	     // Enviar el mensaje por UART
 	     HAL_UART_Transmit(&huart1, (uint8_t *)buffer, len, HAL_MAX_DELAY);
+
+	     LoRa_Send(buffer);
 
 	     lastTransmissionTime = currentTime;
 	   }
@@ -481,6 +486,38 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
         gpsDataReady = 1;
     }
 }
+
+//funciones del Lora:
+
+/* USER CODE BEGIN 4 */
+void LoRa_Init(void)
+{
+    char cmd[64];
+
+    // Configurar el módulo LoRa
+    HAL_UART_Transmit(&huart3, (uint8_t*)"AT+MODE=0\r\n", 11, 1000);
+    HAL_Delay(100);
+
+    // Configurar la frecuencia (ajusta según tu región)
+    HAL_UART_Transmit(&huart3, (uint8_t*)"AT+BAND=868500000\r\n", 20, 1000);
+    HAL_Delay(100);
+
+    // Configurar los parámetros de transmisión
+    HAL_UART_Transmit(&huart3, (uint8_t*)"AT+PARAMETER=10,7,1,7\r\n", 24, 1000);
+    HAL_Delay(100);
+
+    // Configurar la potencia de transmisión
+    HAL_UART_Transmit(&huart3, (uint8_t*)"AT+CRFOP=15\r\n", 13, 1000);
+    HAL_Delay(100);
+}
+
+void LoRa_Send(const char* data)
+{
+    char cmd[600];
+    int len = snprintf(cmd, sizeof(cmd), "AT+SEND=0,%d,%s\r\n", strlen(data), data);
+    HAL_UART_Transmit(&huart3, (uint8_t*)cmd, len, HAL_MAX_DELAY);
+}
+/* USER CODE END 4 */
 /* USER CODE END 4 */
 
 /**
