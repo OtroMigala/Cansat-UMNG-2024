@@ -52,6 +52,8 @@ volatile uint8_t gpsDataReady = 0;
 /* Private variables ---------------------------------------------------------*/
 I2C_HandleTypeDef hi2c1;
 
+TIM_HandleTypeDef htim3;
+
 UART_HandleTypeDef huart1;
 UART_HandleTypeDef huart2;
 UART_HandleTypeDef huart3;
@@ -68,7 +70,6 @@ uint8_t Data[256];
 uint8_t Rxdata[750];
 char Txdata[750];
 uint8_t Flag=0;
-static int Msgindex;
 char *ptr;
 
 char GPS_Payload[100];
@@ -84,6 +85,27 @@ uint16_t tamaño=0;
 char Mensaje_a_enviar_var_unidas[500];
 char mensaje[500];
 
+//altitud:
+
+#define FILTER_SIZE 10
+#define PO 101900.0f  // Presión en Popayán en Pa (ajusta este valor según tus mediciones locales)
+#define RO 1.225f    // Densidad del aire a nivel del mar en kg/m³
+#define G 9.81f      // Aceleración debido a la gravedad en m/s²
+
+float pressureBuffer[FILTER_SIZE];
+int bufferIndex = 0;
+
+//servo
+
+#define SERVO_MIN_PULSE 500   // 0 grados
+#define SERVO_MAX_PULSE 2500  // 180 grados
+#define ALTITUDE_MIN 0        // Altitud mínima en metros
+#define ALTITUDE_TARGET 3.0f   // Altitud objetivo en metros (1.5m como especificaste)
+#define ALTITUDE_MAX 3       // Altitud máxima en metros
+
+TIM_HandleTypeDef htim3;
+float baseAltitude = 0;      // Altitud base (nivel del suelo)
+
 
 
 /* USER CODE END PV */
@@ -96,12 +118,17 @@ static void MX_I2C1_Init(void);
 static void MX_USART1_UART_Init(void);
 static void MX_USART3_UART_Init(void);
 static void MX_USART2_UART_Init(void);
+static void MX_TIM3_Init(void);
 /* USER CODE BEGIN PFP */
 void process_gps_data(void);
 void send_gps_data(void);
 void Format_data(float time, float lat, char lat_dir, float lon, char long_dir);
 void LoRa_Init(void);
 void LoRa_Send(const char* data);
+float movingAverageFilter(float newValue);
+float calculateAltitude(float pressure);
+void moveServoBasedOnAltitude(float altitude);
+void moveServoToAngle(float angle);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -143,7 +170,13 @@ int main(void)
   MX_USART1_UART_Init();
   MX_USART3_UART_Init();
   MX_USART2_UART_Init();
+  MX_TIM3_Init();
+
   /* USER CODE BEGIN 2 */
+  HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1);
+
+  moveServoToAngle(90.0f);
+
   LoRa_Init();
   HAL_UART_Receive_DMA(&huart2, (uint8_t*)gpsBuffer, GPS_BUFFER_SIZE);
   lastTransmissionTime = 0 ;
@@ -163,54 +196,84 @@ int main(void)
 	sprintf((char *)Data, "BMP280: found %s\n", bme280p ? "BME280" : "BMP280");
 	uartx_write_text(&huart1, Data);
 
+
+
+	 float temp, pressure, humidity;
+	 bmp280_read_float(&bmp280, &temp, &pressure, &humidity);
+
+	 for (int i = 0; i < 10; i++) {  // Promedio de 10 lecturas
+	     float temp, pressure, humidity;
+	     bmp280_read_float(&bmp280, &temp, &pressure, &humidity);
+	     baseAltitude += calculateAltitude(pressure);
+	     HAL_Delay(100);  // Pequeña pausa entre lecturas
+	 }
+	 baseAltitude /= 10.0f;
+
 	 //gps
 
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
-	 while (1)
-	 {
-	   uint32_t currentTime = HAL_GetTick();
-	   process_gps_data();
+  while (1)
+  {
+    /* USER CODE END WHILE */
 
-	   if (currentTime - lastTransmissionTime >= 1000)  // 1000 ms = 1 segundo
-	   {
-	     // Leer datos del GPS
-		 send_gps_data();
+    /* USER CODE BEGIN 3 */
 
-	     // Leer datos del BMP280
-	     float temperature, pressure, humidity;
-	     bmp280_read_float(&bmp280, &temperature, &pressure, &humidity);
+	  uint32_t currentTime = HAL_GetTick();
+	 	  process_gps_data();
 
-	     // Leer datos del MPU9250
-	     float accelData[3], gyroData[3], magData[3];
-	     MPU9250_ReadAccel(&hi2c1, accelData);
-	     MPU9250_ReadGyro(&hi2c1, gyroData);
-	     MPU9250_ReadMag(&hi2c1, magData);
+	 	 if (currentTime - lastTransmissionTime >= 1000)  // 1000 ms = 1 segundo
+	 	 {
+	 	   // Leer datos del GPS
+	 	   process_gps_data();
 
-	     // Formar el mensaje con todos los datos
-	     char buffer[512];
-	     int len = snprintf(buffer, sizeof(buffer),
-	         "Time=%02d:%02d:%05.2f, Lat=%.6f, Long=%.6f, "
-	         "Temp=%.2f C, Press=%.2f Pa, Hum=%.2f%%, "
-	         "AccX=%.2f,AccY=%.2f,AccZ=%.2f, "
-	         "GyroX=%.2f,GyroY=%.2f,GyroZ=%.2f, "
-	         "MagX=%.2f,MagY=%.2f,MagZ=%.2f\r\n",
-	         hours, minutes, seconds, latitude, longitude,
-	         temperature, pressure, humidity,
-	         accelData[0], accelData[1], accelData[2],
-	         gyroData[0], gyroData[1], gyroData[2],
-	         magData[0], magData[1], magData[2]);
+	 	   // Leer datos del BMP280
+	 	   float temperature, pressure, humidity;
+	 	   bmp280_read_float(&bmp280, &temperature, &pressure, &humidity);
 
-	     // Enviar el mensaje por UART
-	     HAL_UART_Transmit(&huart1, (uint8_t *)buffer, len, HAL_MAX_DELAY);
+	 	   // Aplicar filtro de media móvil a la presión
+	 	   float filteredPressure = movingAverageFilter(pressure);
 
-	     LoRa_Send(buffer);
+	 	   // Calcular altitud
+	 	   float altitude = calculateAltitude(filteredPressure);
+	 	   float relativeAltitude = altitude - baseAltitude;
 
-	     lastTransmissionTime = currentTime;
-	   }
-	 }
+	 	   // Leer datos del MPU9250
+	 	   float accelData[3], gyroData[3], magData[3];
+	 	   MPU9250_ReadAccel(&hi2c1, accelData);
+	 	   MPU9250_ReadGyro(&hi2c1, gyroData);
+	 	   MPU9250_ReadMag(&hi2c1, magData);
+
+	 	   // Formar el mensaje con todos los datos
+	 	   char buffer[512];
+	 	   int len = snprintf(buffer, sizeof(buffer),
+	 	       "Time=%02d:%02d:%05.2f,Lat=%.6f,Long=%.6f,"
+	 	       "Temp=%.2fC,Press=%.2fPa,Hum=%.2f%%,Alt=%.2fm,RelAlt=%.2fm,"
+	 	       "AccX=%.2f,AccY=%.2f,AccZ=%.2f,"
+	 	       "GyroX=%.2f,GyroY=%.2f,GyroZ=%.2f,"
+	 	       "MagX=%.2f,MagY=%.2f,MagZ=%.2f\r\n",
+	 	       hours, minutes, seconds, latitude, longitude,
+	 	       temperature, filteredPressure, humidity, altitude, relativeAltitude,
+	 	       accelData[0], accelData[1], accelData[2],
+	 	       gyroData[0], gyroData[1], gyroData[2],
+	 	       magData[0], magData[1], magData[2]);
+
+	 	   // Enviar el mensaje por UART1
+	 	   HAL_UART_Transmit(&huart1, (uint8_t *)buffer, len, HAL_MAX_DELAY);
+
+	 	   // Enviar el mensaje por LoRa
+	 	   LoRa_Send(buffer);
+
+	 	   lastTransmissionTime = currentTime;
+
+	 	   // Actualizar la posición del servo basada en la altitud
+	 	   moveServoBasedOnAltitude(altitude);
+	 	 }
+
+
+  }
   /* USER CODE END 3 */
 }
 
@@ -284,6 +347,55 @@ static void MX_I2C1_Init(void)
   /* USER CODE BEGIN I2C1_Init 2 */
 
   /* USER CODE END I2C1_Init 2 */
+
+}
+
+/**
+  * @brief TIM3 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM3_Init(void)
+{
+
+  /* USER CODE BEGIN TIM3_Init 0 */
+
+  /* USER CODE END TIM3_Init 0 */
+
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+  TIM_OC_InitTypeDef sConfigOC = {0};
+
+  /* USER CODE BEGIN TIM3_Init 1 */
+
+  /* USER CODE END TIM3_Init 1 */
+  htim3.Instance = TIM3;
+  htim3.Init.Prescaler = 71;
+  htim3.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim3.Init.Period = 19999;
+  htim3.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim3.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_PWM_Init(&htim3) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim3, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sConfigOC.OCMode = TIM_OCMODE_PWM1;
+  sConfigOC.Pulse = 1500;
+  sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
+  sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
+  if (HAL_TIM_PWM_ConfigChannel(&htim3, &sConfigOC, TIM_CHANNEL_1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM3_Init 2 */
+
+  /* USER CODE END TIM3_Init 2 */
+  HAL_TIM_MspPostInit(&htim3);
 
 }
 
@@ -492,7 +604,6 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 /* USER CODE BEGIN 4 */
 void LoRa_Init(void)
 {
-    char cmd[64];
 
     // Configurar el módulo LoRa
     HAL_UART_Transmit(&huart3, (uint8_t*)"AT+MODE=0\r\n", 11, 1000);
@@ -517,7 +628,64 @@ void LoRa_Send(const char* data)
     int len = snprintf(cmd, sizeof(cmd), "AT+SEND=0,%d,%s\r\n", strlen(data), data);
     HAL_UART_Transmit(&huart3, (uint8_t*)cmd, len, HAL_MAX_DELAY);
 }
-/* USER CODE END 4 */
+float movingAverageFilter(float newValue) {
+    static int count = 0;
+    static float sum = 0;
+
+    if (count < FILTER_SIZE) {
+        pressureBuffer[count] = newValue;
+        sum += newValue;
+        count++;
+    } else {
+        sum -= pressureBuffer[bufferIndex];
+        pressureBuffer[bufferIndex] = newValue;
+        sum += newValue;
+        bufferIndex = (bufferIndex + 1) % FILTER_SIZE;
+    }
+
+    return sum / count;
+}
+void moveServoToAngle(float angle) {
+    uint32_t pulse = SERVO_MIN_PULSE + (angle / 180.0f) * (SERVO_MAX_PULSE - SERVO_MIN_PULSE);
+    __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, pulse);
+
+    // Opcional: añadir un pequeño retraso para dar tiempo al servo de moverse
+    HAL_Delay(500);
+
+    // Imprimir información de depuración
+    char debug[100];
+    snprintf(debug, sizeof(debug), "Servo inicializado a %.1f grados\r\n", angle);
+    HAL_UART_Transmit(&huart1, (uint8_t*)debug, strlen(debug), HAL_MAX_DELAY);
+}
+
+void moveServoBasedOnAltitude(float altitude) {
+    static float lastAltitude = 0;
+    float relativeAltitude = altitude - baseAltitude;
+
+    // Solo actualizamos si hay un cambio significativo en la altitud
+    if (fabs(relativeAltitude - lastAltitude) > 0.05) { // 5 cm de cambio mínimo
+        lastAltitude = relativeAltitude;
+
+        float servoAngle;
+        if (relativeAltitude < 1.0f) {
+            servoAngle = 0.0f;  // Servo en posición inicial
+        } else if (relativeAltitude >= 1.0f && relativeAltitude < 2.0f) {
+            servoAngle = 90.0f;  // Servo a 90 grados cuando alcanza 1 metro
+        } else {
+            servoAngle = 180.0f;  // Servo a 180 grados si supera los 2 metros
+        }
+
+        uint32_t pulse = SERVO_MIN_PULSE + (servoAngle / 180.0f) * (SERVO_MAX_PULSE - SERVO_MIN_PULSE);
+        __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, pulse);
+
+        // Imprimir información de depuración
+        char debug[100];
+        snprintf(debug, sizeof(debug), "Altitude: %.2f m, Rel Alt: %.2f m, Servo Angle: %.2f deg, Pulse: %lu\r\n",
+                 altitude, relativeAltitude, servoAngle, pulse);
+        HAL_UART_Transmit(&huart1, (uint8_t*)debug, strlen(debug), HAL_MAX_DELAY);
+    }
+}
+
 /* USER CODE END 4 */
 
 /**
