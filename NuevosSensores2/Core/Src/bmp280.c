@@ -47,8 +47,18 @@
 #define BMP280_REG_ID          0xD0
 #define BMP280_REG_CALIB       0x88
 #define BMP280_REG_HUM_CALIB   0x88
-
 #define BMP280_RESET_VALUE     0xB6
+
+
+#define PO 101900.0f  // Presión atmosférica promedio en Popayán en Pa
+#define RO 1.225f     // Densidad del aire a nivel del mar en kg/m^3
+#define G 9.81f       // Aceleración debido a la gravedad en m/s^2
+
+#define FILTER_SIZE 10  // Tamaño del filtro de media móvil
+
+float pressure_buffer[FILTER_SIZE];
+int buffer_index = 0;
+
 
 
 
@@ -349,21 +359,49 @@ bool bmp280_read_float(BMP280_HandleTypedef *dev, float *temperature, float *pre
 }
 
 void calculateAndDisplayAltitude(BMP280_HandleTypedef *dev, UART_HandleTypeDef *huart) {
-    float temperature, pressure, altitude;
+    float temperature, pressure, filtered_pressure, altitude;
 
-    // Intenta leer la temperatura y presión
     if (bmp280_read_float(dev, &temperature, &pressure, NULL)) {
-        // Calcular la altitud usando la fórmula barométrica.
-        // La presión devuelta por bmp280_read_float ya está en Pa.
-        altitude = 44330 * (1 - pow(pressure / 101325.0, 1/5.255));
+        filtered_pressure = applyMovingAverageFilter(pressure);
+        altitude = calculateAltitude(filtered_pressure);
 
-        // Preparar y enviar el mensaje de altitud
         char output[128];
-        snprintf(output, sizeof(output), "Altitud: %f metros\n", altitude);
+        snprintf(output, sizeof(output), "Temperatura: %.2f°C, Presión: %.2f Pa, Altitud: %.2f metros\n",
+                 temperature, filtered_pressure, altitude);
         uartx_write_text(huart, (uint8_t *)output);
     } else {
-        // En caso de error en la lectura, enviar un mensaje de error
         char errorMsg[] = "Error leyendo del sensor BMP280.\n";
         uartx_write_text(huart, (uint8_t *)errorMsg);
     }
+}
+
+
+/*float calculateAltitude(float pressure)
+{
+    float P = pressure;
+    float h = (-PO * log(P / PO)) / (RO * G);
+    return h;
+}*/
+
+float calculateAltitude(float pressure) {
+    return 44330.0 * (1.0 - pow((pressure / PO), 0.1903));
+}
+
+float applyMovingAverageFilter(float new_pressure)
+{
+    static int is_buffer_full = 0;
+    float sum = 0;
+
+    pressure_buffer[buffer_index] = new_pressure;
+    buffer_index = (buffer_index + 1) % FILTER_SIZE;
+
+    if (buffer_index == 0) {
+        is_buffer_full = 1;
+    }
+
+    for (int i = 0; i < (is_buffer_full ? FILTER_SIZE : buffer_index); i++) {
+        sum += pressure_buffer[i];
+    }
+
+    return sum / (is_buffer_full ? FILTER_SIZE : buffer_index);
 }
