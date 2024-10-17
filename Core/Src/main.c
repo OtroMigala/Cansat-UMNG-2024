@@ -235,7 +235,7 @@ int main(void)
 	 //gps
 
   /* USER CODE END 2 */
-
+  //Ciclo princial
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
