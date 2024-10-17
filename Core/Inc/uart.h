@@ -25,7 +25,7 @@ void Comando(char Address_Lora[], char Carga_util[]);
 
 
 //Modulo gps
-void Format_data(float time, float lat, char lat_dir, float lon, char long_dir);
+void Format_data(float time, float lat, char lat_dir, float lon, char long_dir, float gps_alt);
 void get_location(void);
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart);
 

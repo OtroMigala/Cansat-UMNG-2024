@@ -27,6 +27,10 @@
  */
 
 #include <bmp280.h>
+#include <math.h>
+#include <main.h>
+#include <stdio.h>
+
 
 /**
  * BMP280 registers
@@ -50,15 +54,24 @@
 #define BMP280_RESET_VALUE     0xB6
 
 
-#define PO 101900.0f  // Presión atmosférica promedio en Popayán en Pa
+#define PO 82318.98f  // Presión atmosférica promedio en Popayán en Pa
 #define RO 1.225f     // Densidad del aire a nivel del mar en kg/m^3
 #define G 9.81f       // Aceleración debido a la gravedad en m/s^2
+
+
+#define POPAYAN_ALTITUDE 1738.0f  // Altitud promedio de Popayán en metros
+#define SEA_LEVEL_PRESSURE 101325.0f  // Presión a nivel del mar en Pascales
 
 #define FILTER_SIZE 10  // Tamaño del filtro de media móvil
 
 float pressure_buffer[FILTER_SIZE];
 int buffer_index = 0;
 
+extern float baseAltitude;
+float current_temperature = 0.0f;
+float current_pressure = 0.0f;
+float current_absolute_altitude = 0.0f;
+float current_relative_altitude = 0.0f;
 
 
 
@@ -358,50 +371,127 @@ bool bmp280_read_float(BMP280_HandleTypedef *dev, float *temperature, float *pre
 	return false;
 }
 
+void uartx_write_text(UART_HandleTypeDef *huart, uint8_t *text);
+
+
+/**
+ * @brief Calcula y muestra la altitud basada en las lecturas del sensor BMP280
+ * @param dev Puntero al dispositivo BMP280
+ * @param huart Puntero al manejador UART para la salida
+ *
+ * Esta función lee la temperatura y presión del sensor BMP280, aplica un filtro
+ * de media móvil a la presión, calcula la altitud y muestra los resultados por UART.
+ */
 void calculateAndDisplayAltitude(BMP280_HandleTypedef *dev, UART_HandleTypeDef *huart) {
     float temperature, pressure, filtered_pressure, altitude;
 
+    // Intenta leer la temperatura y presión del sensor BMP280
     if (bmp280_read_float(dev, &temperature, &pressure, NULL)) {
+        // Aplica el filtro de media móvil a la presión
         filtered_pressure = applyMovingAverageFilter(pressure);
+        // Calcula la altitud basada en la presión filtrada
         altitude = calculateAltitude(filtered_pressure);
 
+        // Prepara y envía el mensaje con los datos por UART
         char output[128];
         snprintf(output, sizeof(output), "Temperatura: %.2f°C, Presión: %.2f Pa, Altitud: %.2f metros\n",
                  temperature, filtered_pressure, altitude);
         uartx_write_text(huart, (uint8_t *)output);
     } else {
+        // En caso de error en la lectura, envía un mensaje de error
         char errorMsg[] = "Error leyendo del sensor BMP280.\n";
         uartx_write_text(huart, (uint8_t *)errorMsg);
     }
 }
 
+/**
+ * @brief Calcula la altitud basada en la presión atmosférica
+ * @param pressure Presión atmosférica en Pascales
+ * @return Altitud calculada en metros
+ *
+ * Esta función utiliza la fórmula barométrica para calcular la altitud
+ * basada en la presión atmosférica medida.
+ */
+float calculateAltitude(float pressure) {
+    return 44330.0f * (1.0f - pow(pressure / SEA_LEVEL_PRESSURE, 0.1903f));
+}
 
-/*float calculateAltitude(float pressure)
-{
-    float P = pressure;
-    float h = (-PO * log(P / PO)) / (RO * G);
-    return h;
-}*/
-
+/* Versión alternativa de la función de cálculo de altitud
+ *
 float calculateAltitude(float pressure) {
     return 44330.0 * (1.0 - pow((pressure / PO), 0.1903));
 }
+*/
 
+/**
+ * @brief Aplica un filtro de media móvil a las lecturas de presión
+ * @param new_pressure Nueva lectura de presión a ser filtrada
+ * @return Valor de presión filtrado
+ *
+ * Esta función implementa un filtro de media móvil para suavizar las
+ * lecturas de presión. Utiliza un buffer circular para almacenar las
+ * últimas FILTER_SIZE lecturas.
+ */
 float applyMovingAverageFilter(float new_pressure)
 {
     static int is_buffer_full = 0;
     float sum = 0;
 
+    // Añade la nueva lectura al buffer circular
     pressure_buffer[buffer_index] = new_pressure;
     buffer_index = (buffer_index + 1) % FILTER_SIZE;
 
+    // Comprueba si el buffer está lleno
     if (buffer_index == 0) {
         is_buffer_full = 1;
     }
 
+    // Suma todas las lecturas en el buffer
     for (int i = 0; i < (is_buffer_full ? FILTER_SIZE : buffer_index); i++) {
         sum += pressure_buffer[i];
     }
 
+    // Devuelve la media de las lecturas
     return sum / (is_buffer_full ? FILTER_SIZE : buffer_index);
+}
+
+void initializeBaseAltitude(BMP280_HandleTypedef *dev) {
+    float temperature, pressure, humidity;
+    float sum = 0;
+    int valid_readings = 0;
+
+    for (int i = 0; i < 20; i++) {
+        if (bmp280_read_float(dev, &temperature, &pressure, &humidity)) {
+            sum += calculateAltitude(pressure);
+            valid_readings++;
+        }
+        HAL_Delay(100);
+    }
+
+    if (valid_readings > 0) {
+        baseAltitude = sum / valid_readings;
+    } else {
+        baseAltitude = POPAYAN_ALTITUDE;
+    }
+}
+
+float getRelativeAltitude(float current_altitude) {
+    return current_altitude - baseAltitude;
+}
+
+void updateAltitudeData(BMP280_HandleTypedef *dev) {
+    float temperature, pressure, humidity;
+
+    if (bmp280_read_float(dev, &temperature, &pressure, &humidity)) {
+        float filtered_pressure = applyMovingAverageFilter(pressure);
+        float absolute_altitude = calculateAltitude(filtered_pressure);
+        float relative_altitude = getRelativeAltitude(absolute_altitude);
+
+        // Actualizar las variables globales o estructuras de datos según sea necesario
+        // Por ejemplo:
+        current_temperature = temperature;
+        current_pressure = filtered_pressure;
+        current_absolute_altitude = absolute_altitude;
+        current_relative_altitude = relative_altitude;
+    }
 }

@@ -12,6 +12,9 @@
 #include "main.h"
 #include <stdint.h>
 #include <stdbool.h>
+#include <stdio.h>
+#include <math.h>
+
 
 /**
  * BMP280 or BME280 address is 0x77 if SDO pin is high, and is 0x76 if
@@ -176,6 +179,9 @@ bool bmp280_read_float(BMP280_HandleTypedef *dev, float *temperature,
 
 float applyMovingAverageFilter(float new_pressure);
 float calculateAltitude(float pressure);
+void initializeBaseAltitude(BMP280_HandleTypedef *dev);
+float getRelativeAltitude(float current_altitude);
+void updateAltitudeData(BMP280_HandleTypedef *dev);
 
 
 #endif  // __BMP280_H__

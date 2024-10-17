@@ -87,24 +87,40 @@ char mensaje[500];
 
 //altitud:
 
+float gps_altitude = 0; // Nueva variable para la altitud del GPS
+
+//Press=82893.48Pa
 #define FILTER_SIZE 10
-#define PO 101900.0f  // Presión en Popayán en Pa (ajusta este valor según tus mediciones locales)
+#define PO 74450.0f //Presion en cajicá
+//#define PO 82318.98f  // Presión en lab de camilo
 #define RO 1.225f    // Densidad del aire a nivel del mar en kg/m³
 #define G 9.81f      // Aceleración debido a la gravedad en m/s²
 
 float pressureBuffer[FILTER_SIZE];
 int bufferIndex = 0;
 
+///ahorrodeenergia
+uint32_t lastWakeTime = 0;
+const uint32_t SLEEP_INTERVAL = 5000; // 5 segundos de intervalo de sueño
+const uint32_t TRANSMIT_INTERVAL = 60000; // 1 minuto entre transmisiones
 //servo
 
-#define SERVO_MIN_PULSE 500   // 0 grados
-#define SERVO_MAX_PULSE 2500  // 180 grados
+#define SERVO_MIN_PULSE 1000   // 0 grados
+#define SERVO_MAX_PULSE 2000  // 180 grados
+#define SERVO_FILTER_SIZE 5
+float servoAngleBuffer[SERVO_FILTER_SIZE] = {0};
+int servoBufferIndex = 0;
+
 #define ALTITUDE_MIN 0        // Altitud mínima en metros
-#define ALTITUDE_TARGET 3.0f   // Altitud objetivo en metros (1.5m como especificaste)
-#define ALTITUDE_MAX 3       // Altitud máxima en metros
+#define ALTITUDE_TARGET 200.0f   // Altitud objetivo en metros (1.5m como especificaste)
+#define ALTITUDE_MAX 500       // Altitud máxima en metros
 
 TIM_HandleTypeDef htim3;
 float baseAltitude = 0;      // Altitud base (nivel del suelo)
+
+float lastAltitude = 0;
+bool passedFirstPeak = false;
+float servoAngle = 0;
 
 
 
@@ -122,12 +138,14 @@ static void MX_TIM3_Init(void);
 /* USER CODE BEGIN PFP */
 void process_gps_data(void);
 void send_gps_data(void);
-void Format_data(float time, float lat, char lat_dir, float lon, char long_dir);
+void Format_data(float time, float lat, char lat_dir, float lon, char long_dir, float gps_alt);
 void LoRa_Init(void);
+void initializeServo(void);
 void LoRa_Send(const char* data);
 float movingAverageFilter(float newValue);
 float calculateAltitude(float pressure);
 void moveServoBasedOnAltitude(float altitude);
+float filterServoAngle(float newAngle);
 void moveServoToAngle(float angle);
 /* USER CODE END PFP */
 
@@ -170,12 +188,17 @@ int main(void)
   MX_USART1_UART_Init();
   MX_USART3_UART_Init();
   MX_USART2_UART_Init();
-  MX_TIM3_Init();
 
   /* USER CODE BEGIN 2 */
-  HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1);
+  MX_TIM3_Init();
+  HAL_TIM_Base_Start(&htim3);
+  initializeServo();
 
-  moveServoToAngle(90.0f);
+  char debug[100];
+  snprintf(debug, sizeof(debug), "Timer3 config: PSC=%lu, ARR=%lu, Frecuencia=%lu Hz\r\n",
+           htim3.Init.Prescaler, htim3.Init.Period,
+           HAL_RCC_GetPCLK1Freq() / ((htim3.Init.Prescaler + 1) * (htim3.Init.Period + 1)));
+  HAL_UART_Transmit(&huart1, (uint8_t*)debug, strlen(debug), HAL_MAX_DELAY);
 
   LoRa_Init();
   HAL_UART_Receive_DMA(&huart2, (uint8_t*)gpsBuffer, GPS_BUFFER_SIZE);
@@ -201,13 +224,13 @@ int main(void)
 	 float temp, pressure, humidity;
 	 bmp280_read_float(&bmp280, &temp, &pressure, &humidity);
 
-	 for (int i = 0; i < 10; i++) {  // Promedio de 10 lecturas
+	 for (int i = 0; i < 20; i++) {  // Promedio de 10 lecturas
 	     float temp, pressure, humidity;
 	     bmp280_read_float(&bmp280, &temp, &pressure, &humidity);
 	     baseAltitude += calculateAltitude(pressure);
 	     HAL_Delay(100);  // Pequeña pausa entre lecturas
 	 }
-	 baseAltitude /= 10.0f;
+	 baseAltitude /= 20.0f;
 
 	 //gps
 
@@ -220,59 +243,58 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-
 	  uint32_t currentTime = HAL_GetTick();
-	 	  process_gps_data();
 
-	 	 if (currentTime - lastTransmissionTime >= 1000)  // 1000 ms = 1 segundo
-	 	 {
-	 	   // Leer datos del GPS
-	 	   process_gps_data();
+	     if (currentTime - lastTransmissionTime >= 1000)  // 1000 ms = 1 segundo
+	     {
+	         // Leer datos del GPS
+	         process_gps_data();
 
-	 	   // Leer datos del BMP280
-	 	   float temperature, pressure, humidity;
-	 	   bmp280_read_float(&bmp280, &temperature, &pressure, &humidity);
+	         // Leer datos del BMP280
+	         float temperature, pressure;
+	         bmp280_read_float(&bmp280, &temperature, &pressure, NULL);
 
-	 	   // Aplicar filtro de media móvil a la presión
-	 	   float filteredPressure = movingAverageFilter(pressure);
+	         // Aplicar filtro de media móvil a la presión
+	         float filteredPressure = movingAverageFilter(pressure);
 
-	 	   // Calcular altitud
-	 	   float altitude = calculateAltitude(filteredPressure);
-	 	   float relativeAltitude = altitude - baseAltitude;
+	         // Calcular altitud con el BMP280
+	         float bmp280_altitude = calculateAltitude(filteredPressure);
+	         float relativeAltitude = bmp280_altitude - baseAltitude;
 
-	 	   // Leer datos del MPU9250
-	 	   float accelData[3], gyroData[3], magData[3];
-	 	   MPU9250_ReadAccel(&hi2c1, accelData);
-	 	   MPU9250_ReadGyro(&hi2c1, gyroData);
-	 	   MPU9250_ReadMag(&hi2c1, magData);
+	         // Solo mover el servo si es necesario
+	         moveServoBasedOnAltitude(bmp280_altitude);
 
-	 	   // Formar el mensaje con todos los datos
-	 	   char buffer[512];
-	 	   int len = snprintf(buffer, sizeof(buffer),
-	 	       "Time=%02d:%02d:%05.2f,Lat=%.6f,Long=%.6f,"
-	 	       "Temp=%.2fC,Press=%.2fPa,Hum=%.2f%%,Alt=%.2fm,RelAlt=%.2fm,"
-	 	       "AccX=%.2f,AccY=%.2f,AccZ=%.2f,"
-	 	       "GyroX=%.2f,GyroY=%.2f,GyroZ=%.2f,"
-	 	       "MagX=%.2f,MagY=%.2f,MagZ=%.2f\r\n",
-	 	       hours, minutes, seconds, latitude, longitude,
-	 	       temperature, filteredPressure, humidity, altitude, relativeAltitude,
-	 	       accelData[0], accelData[1], accelData[2],
-	 	       gyroData[0], gyroData[1], gyroData[2],
-	 	       magData[0], magData[1], magData[2]);
+	         // Leer datos del MPU9250
+	         float accelData[3], gyroData[3], magData[3];
+	         MPU9250_ReadAccel(&hi2c1, accelData);
+	         MPU9250_ReadGyro(&hi2c1, gyroData);
+	         MPU9250_ReadMag(&hi2c1, magData);
 
-	 	   // Enviar el mensaje por UART1
-	 	   HAL_UART_Transmit(&huart1, (uint8_t *)buffer, len, HAL_MAX_DELAY);
+	         // Formar el mensaje con los datos
+	         char buffer[512];
+	         int len = snprintf(buffer, sizeof(buffer),
+	             "Time=%02d:%02d:%05.2f,Lat=%.6f,Long=%.6f,"
+	             "Temp=%.2fC,Press=%.2fPa,RelAlt=%.2fm,"
+	             "AccX=%.2f,AccY=%.2f,AccZ=%.2f,"
+	             "GyroX=%.2f,GyroY=%.2f,GyroZ=%.2f,"
+	             "MagX=%.2f,MagY=%.2f,MagZ=%.2f\r\n",
+	             hours, minutes, seconds, latitude, longitude,
+	             temperature, filteredPressure, relativeAltitude,
+	             accelData[0], accelData[1], accelData[2],
+	             gyroData[0], gyroData[1], gyroData[2],
+	             magData[0], magData[1], magData[2]);
 
-	 	   // Enviar el mensaje por LoRa
-	 	   LoRa_Send(buffer);
+	         // Enviar el mensaje por UART1
+	         HAL_UART_Transmit(&huart1, (uint8_t *)buffer, len, HAL_MAX_DELAY);
 
-	 	   lastTransmissionTime = currentTime;
+	         // Enviar el mensaje por LoRa
+	         LoRa_Send(buffer);
 
-	 	   // Actualizar la posición del servo basada en la altitud
-	 	   moveServoBasedOnAltitude(altitude);
-	 	 }
+	         lastTransmissionTime = currentTime;
+	     }
 
-
+	     // Entrar en modo de bajo consumo
+	     HAL_PWR_EnterSLEEPMode(PWR_MAINREGULATOR_ON, PWR_SLEEPENTRY_WFI);
   }
   /* USER CODE END 3 */
 }
@@ -534,15 +556,16 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
-
 void process_gps_data(void)
 {
     if (gpsDataReady)
     {
-        char *ptr = strstr((char*)gpsBuffer, "$GPRMC");
-        if (ptr != NULL)
+        char *ptr_rmc = strstr((char*)gpsBuffer, "$GPRMC");
+        char *ptr_gga = strstr((char*)gpsBuffer, "$GPGGA");
+
+        if (ptr_rmc != NULL)
         {
-            if (sscanf(ptr, "$GPRMC,%f,A,%f,%c,%f,%c", &time, &latitude, &lat_dir, &longitude, &long_dir) == 5)
+            if (sscanf(ptr_rmc, "$GPRMC,%f,A,%f,%c,%f,%c", &time, &latitude, &lat_dir, &longitude, &long_dir) == 5)
             {
                 // Convertir latitud y longitud a grados decimales
                 float lat_degrees = (int)(latitude / 100);
@@ -560,13 +583,27 @@ void process_gps_data(void)
                 minutes = (int)(time - (hours * 10000)) / 100;
                 seconds = time - ((int)time / 100) * 100;
             }
+        }
+
+        if (ptr_gga != NULL)
+        {
+            if (sscanf(ptr_gga, "$GPGGA,%*f,%*f,%*c,%*f,%*c,%*d,%*d,%*f,%f", &gps_altitude) == 1)
+            {
+                // La altitud del GPS se ha extraído correctamente
+            }
             else
             {
-                // Si no se pudo parsear correctamente, invalidar los datos
-                time = 0;
-                latitude = 0;
-                longitude = 0;
+                gps_altitude = 0; // Si no se pudo extraer, se establece a 0
             }
+        }
+
+        if (ptr_rmc == NULL && ptr_gga == NULL)
+        {
+            // Si no se encontró ninguna de las dos cadenas, invalidar los datos
+            time = 0;
+            latitude = 0;
+            longitude = 0;
+            gps_altitude = 0;
         }
 
         gpsDataReady = 0;
@@ -579,15 +616,15 @@ void send_gps_data(void)
 {
     if (time != 0 && latitude != 0 && longitude != 0)
     {
-        Format_data(time, latitude, lat_dir, longitude, long_dir);
+        Format_data(time, latitude, lat_dir, longitude, long_dir, gps_altitude);
     }
 }
 
-void Format_data(float time, float lat, char lat_dir, float lon, char long_dir)
+void Format_data(float time, float lat, char lat_dir, float lon, char long_dir, float gps_alt)
 {
-    char Data[100];
-    snprintf(Data, sizeof(Data), "\r\nTime=%02d:%02d:%05.2f, Lat=%.6f, Long=%.6f\r\n",
-             hours, minutes, seconds, lat, lon);
+    char Data[150];
+    snprintf(Data, sizeof(Data), "\r\nTime=%02d:%02d:%05.2f, Lat=%.6f, Long=%.6f, GPS Alt=%.2f m\r\n",
+             hours, minutes, seconds, lat, lon, gps_alt);
     HAL_UART_Transmit(&huart1, (uint8_t*)Data, strlen(Data), 1000);
 }
 
@@ -618,7 +655,8 @@ void LoRa_Init(void)
     HAL_Delay(100);
 
     // Configurar la potencia de transmisión
-    HAL_UART_Transmit(&huart3, (uint8_t*)"AT+CRFOP=15\r\n", 13, 1000);
+    // A mayor potencia de transmisión, mayor consumo de corriente (a tener en cuenta)
+    HAL_UART_Transmit(&huart3, (uint8_t*)"AT+CRFOP=6\r\n", 13, 1000);
     HAL_Delay(100);
 }
 
@@ -645,46 +683,96 @@ float movingAverageFilter(float newValue) {
 
     return sum / count;
 }
-void moveServoToAngle(float angle) {
-    uint32_t pulse = SERVO_MIN_PULSE + (angle / 180.0f) * (SERVO_MAX_PULSE - SERVO_MIN_PULSE);
-    __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, pulse);
+float filterServoAngle(float newAngle) {
+    static int count = 0;
+    static float sum = 0;
 
-    // Opcional: añadir un pequeño retraso para dar tiempo al servo de moverse
-    HAL_Delay(500);
+    if (count < SERVO_FILTER_SIZE) {
+        servoAngleBuffer[count] = newAngle;
+        sum += newAngle;
+        count++;
+    } else {
+        sum -= servoAngleBuffer[servoBufferIndex];
+        servoAngleBuffer[servoBufferIndex] = newAngle;
+        sum += newAngle;
+        servoBufferIndex = (servoBufferIndex + 1) % SERVO_FILTER_SIZE;
+    }
 
-    // Imprimir información de depuración
-    char debug[100];
-    snprintf(debug, sizeof(debug), "Servo inicializado a %.1f grados\r\n", angle);
-    HAL_UART_Transmit(&huart1, (uint8_t*)debug, strlen(debug), HAL_MAX_DELAY);
+    return sum / count;
 }
 
+void moveServoToAngle(float angle) {
+    if (angle < 0) angle = 0;
+    if (angle > 180) angle = 180;
+
+    uint32_t pulse = SERVO_MIN_PULSE + (uint32_t)((angle / 180.0f) * (SERVO_MAX_PULSE - SERVO_MIN_PULSE));
+    __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, pulse);
+
+    char debug[100];
+    snprintf(debug, sizeof(debug), "Servo movido a %.1f grados, pulse: %lu\r\n", angle, pulse);
+    HAL_UART_Transmit(&huart1, (uint8_t*)debug, strlen(debug), HAL_MAX_DELAY);
+
+    HAL_Delay(20);  // Pequeña pausa para estabilizar
+}
 void moveServoBasedOnAltitude(float altitude) {
     static float lastAltitude = 0;
+    static float maxAltitude = 0;
+    static bool parachuteDeployed = false;
+    static uint32_t lastMoveTime = 0;
+    static const float DEPLOY_ALTITUDE = 200.0f; // Altura de despliegue en metros
+    static const float ALTITUDE_HYSTERESIS = 2.0f; // Aumentamos la histéresis para mayor altura
+    static const uint32_t MOVE_DELAY = 1000; // Retraso mínimo entre comprobaciones en ms
+
     float relativeAltitude = altitude - baseAltitude;
+    uint32_t currentTime = HAL_GetTick();
 
-    // Solo actualizamos si hay un cambio significativo en la altitud
-    if (fabs(relativeAltitude - lastAltitude) > 0.05) { // 5 cm de cambio mínimo
-        lastAltitude = relativeAltitude;
+    // Actualizar la altitud máxima alcanzada
+    if (relativeAltitude > maxAltitude) {
+        maxAltitude = relativeAltitude;
+    }
 
-        float servoAngle;
-        if (relativeAltitude < 1.0f) {
-            servoAngle = 0.0f;  // Servo en posición inicial
-        } else if (relativeAltitude >= 1.0f && relativeAltitude < 2.0f) {
-            servoAngle = 90.0f;  // Servo a 90 grados cuando alcanza 1 metro
-        } else {
-            servoAngle = 180.0f;  // Servo a 180 grados si supera los 2 metros
-        }
+    // Verificar si ha pasado suficiente tiempo desde la última comprobación
+    if (currentTime - lastMoveTime < MOVE_DELAY) {
+        return;
+    }
 
-        uint32_t pulse = SERVO_MIN_PULSE + (servoAngle / 180.0f) * (SERVO_MAX_PULSE - SERVO_MIN_PULSE);
-        __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, pulse);
+    // Comprobar si hemos alcanzado o superado la altura de despliegue
+    if (!parachuteDeployed && relativeAltitude >= DEPLOY_ALTITUDE) {
+        // Activar el servo para desplegar el paracaídas
+        moveServoToAngle(60.0f);  // Ajustamos a 90 grados para un despliegue completo
+
+        parachuteDeployed = true;
 
         // Imprimir información de depuración
         char debug[100];
-        snprintf(debug, sizeof(debug), "Altitude: %.2f m, Rel Alt: %.2f m, Servo Angle: %.2f deg, Pulse: %lu\r\n",
-                 altitude, relativeAltitude, servoAngle, pulse);
+        snprintf(debug, sizeof(debug), "Paracaídas desplegado! Alt: %.2f m, Max Alt: %.2f m, Servo: 90.0 deg\r\n",
+                 relativeAltitude, maxAltitude);
         HAL_UART_Transmit(&huart1, (uint8_t*)debug, strlen(debug), HAL_MAX_DELAY);
     }
+
+    lastAltitude = relativeAltitude;
+    lastMoveTime = currentTime;
 }
+void initializeServo() {
+    HAL_TIM_PWM_Stop(&htim3, TIM_CHANNEL_1);
+    TIM_OC_InitTypeDef sConfigOC = {0};
+    sConfigOC.OCMode = TIM_OCMODE_PWM1;
+    sConfigOC.Pulse = SERVO_MIN_PULSE;  // Usar SERVO_MIN_PULSE en lugar de 1500
+    sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
+    sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
+    HAL_TIM_PWM_ConfigChannel(&htim3, &sConfigOC, TIM_CHANNEL_1);
+    HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1);
+
+    // Mover el servo a 0 grados
+    moveServoToAngle(0);
+    HAL_Delay(1000);
+
+    char debug[100];
+    snprintf(debug, sizeof(debug), "Servo inicializado a 0 grados\r\n");
+    HAL_UART_Transmit(&huart1, (uint8_t*)debug, strlen(debug), HAL_MAX_DELAY);
+}
+
+
 
 /* USER CODE END 4 */
 
