@@ -2,7 +2,7 @@
  * mpu9250.h
  *
  *  Created on: Apr 17, 2024
- *      Author: william
+ *      Author: Alejo
  */
 
 #ifndef MPU9250_H
